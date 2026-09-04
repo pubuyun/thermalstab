@@ -1,0 +1,36 @@
+{
+  "input": {
+    "pdb": "1CXI.pdb",
+    "chain": "A",
+    "mutable_positions": "mutable_positions.txt"
+  },
+  "output_dir": "results/spurs",
+  "runtime": {
+    "spurs_repo": "/root/software/SPURS",
+    "offline_root": "/root/models/spurs-offline",
+    "model_revision": "0cc7a565af8f31eb122819f95a9d16e27b3d1596",
+    "device": "cuda",
+    "batch_size": 8,
+    "seed": 42,
+    "wt_zero_tolerance": 0.00001
+  },
+  "single": {"cutoff": -0.5},
+  "pair_graph": {
+    "severe": {"pair_ddg_min": -0.5, "epistasis_max": 1.0},
+    "high_confidence": {"pair_ddg_max": -1.2, "epistasis_max": 0.5}
+  },
+  "beam": {
+    "depth": 8,
+    "width": 100,
+    "high_confidence_quota": 0.8,
+    "high_edge_ratio": 0.8,
+    "frequency_limit": 0.6,
+    "frequency_denominator": "configured_width"
+  },
+  "gradient": {
+    "source": "document_arrays_confirmed_by_user",
+    "diversity": [0, 1, 1, 1, 2, 2, 2, 3],
+    "marginal": [0, 0, -0.5, -0.5, -0.3, -0.3, -0.2, -0.2]
+  },
+  "positive_controls": [["N188D", "K192R"]]
+}
