@@ -21,7 +21,7 @@ def configure_environment(cfg):
     runtime = cfg["runtime"]
     root, repo = Path(runtime["offline_root"]), Path(runtime["spurs_repo"])
     if not (repo / "spurs/inference.py").is_file():
-        raise FileNotFoundError(f"SPURS source missing: {repo}; set runtime.spurs_repo")
+        raise FileNotFoundError(f"SPURS source missing: {repo}; set the SPURS_REPO environment variable")
     # These must be set before importing torch/huggingface_hub/spurs.
     os.environ["HF_HUB_CACHE"] = str(root / "hf_hub")
     os.environ["TORCH_HOME"] = str(root / "torch")
@@ -37,7 +37,7 @@ def preflight(cfg, residues):
     cache = root / "hf_hub/models--cyclization9--SPURS"
     revision = runtime["model_revision"]
     if (cache / "refs/main").read_text().strip() != revision:
-        raise ValueError("Offline refs/main differs from runtime.model_revision; refusing a different checkpoint")
+        raise ValueError("Offline refs/main differs from the expected revision; check SPURS_MODEL_REVISION")
     files = []
     for model in ("spurs", "spurs_multi"):
         for rel in (".hydra/config.yaml", "checkpoints/best.ckpt"):

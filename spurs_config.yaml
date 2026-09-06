@@ -1,0 +1,23 @@
+# Results are written beside this file, in spurs_config/.
+single:
+  cutoff: -0.5
+
+pair_graph:
+  severe:
+    pair_ddg_min: -0.5
+    epistasis_max: 1.0
+  high_confidence:
+    pair_ddg_max: -1.2
+    epistasis_max: 0.5
+
+beam:
+  depth: 8
+  width: 100
+  high_confidence_quota: 0.8
+  high_edge_ratio: 0.80
+  frequency_limit: 0.60
+
+# Index = mutation count - 1. Provide at least beam.depth entries.
+gradient:
+  diversity: [0, 1, 1, 1, 2, 2, 2, 3]
+  marginal: [0, 0, -0.5, -0.5, -0.3, -0.3, -0.2, -0.2]

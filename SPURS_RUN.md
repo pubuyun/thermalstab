@@ -1,149 +1,172 @@
-# SPURS 后两阶段运行说明
+# SPURS 单点筛选与组合搜索
 
-本实现只使用 SPURS：阶段 2 为单点生成与筛选，阶段 3 为双点兼容图与最多 8 点的 Diverse Beam Search。不运行方法文档中的 Other Evaluation Methods，不重新计算第一阶段的可突变位点。
+只执行 SPURS 单点筛选、完整双点兼容图和 Diverse Beam Search。可突变位置使用第一阶段结果；已移除阳性对照，不运行 Other Evaluation Methods。
 
-## 在远程服务器运行
+## 启动和输出目录
 
-将整个项目同步或 Git 拉取到服务器，保留 `1CXI.pdb`、根目录的 `mutable_positions.txt`、`spurs_config.json`、`scripts/` 和 `run_spurs.sh`。进入项目根目录，使用已经装好 SPURS 的 Python 环境：
-
-```bash
-python -V
-bash run_spurs.sh --check
-bash run_spurs.sh --smoke-test
-bash run_spurs.sh --stage all
-```
-
-`--check` 检查离线文件、Python 包导入、CUDA 运算、两个模型各自配置下的真实 SPURS 解析结果，将诊断映射写入 `preflight_mapping.csv`。`--smoke-test` 在 **1CXI A 链**执行完整单点前向和多点前向，检查单组合输出、批量输出和重复前向一致性；成功日志包含 `Single prediction: PASS` 和 `Multi prediction: PASS`。阳性对照的预测不要求人为通过稳定化阈值。
-
-`--stage all` 也会自动预检，完成单点、对照、完整双点图和组合搜索。以上命令不会安装依赖、启动其他服务或联网下载权重。不要求项目放在 SPURS 源码目录，不要求存在特定名称的 Conda 环境，也不依赖 `.bashrc`。
-
-也可从任意目录直接运行：
+在已安装 SPURS 的服务器 Python 环境中，显式指定 YAML：
 
 ```bash
-python -u /path/to/thermalstab/scripts/run_spurs.py --config /path/to/thermalstab/spurs_config.json --stage all
+bash run_spurs.sh --config spurs_config.yaml --check
+bash run_spurs.sh --config spurs_config.yaml --smoke-test
+bash run_spurs.sh --config spurs_config.yaml --stage all
 ```
 
-已提供 LF 换行规则，使用 `bash run_spurs.sh` 无需设置可执行位。
+`--config` 必填，没有隐式默认配置。`--check` 检查离线文件、依赖导入、CUDA 运算和真实 SPURS 编号映射。`--smoke-test` 从输入结构自动构造两组 API 探针，检查前向、批量和重复调用一致性；不假定稳定化效果，不写入候选或搜索缓存。
 
-## 唯一配置文件
+结果直接保存到 **YAML 文件旁的同名目录**：
 
-`spurs_config.json` 包含输入、输出、远程路径、模型 revision、批量大小、随机种子、所有筛选与搜索阈值、阳性对照。
-
-默认使用交接文档里的 `/root/software/SPURS`、`/root/models/spurs-offline` 和模型 revision `0cc7a565af8f31eb122819f95a9d16e27b3d1596`。路径不同只需修改 `runtime.spurs_repo` / `runtime.offline_root`。输入和输出的相对路径均相对于配置文件所在目录。
-
-程序会在导入 Hugging Face、torch、SPURS 之前设置 `HF_HUB_CACHE`、`TORCH_HOME`、`HF_HUB_OFFLINE=1`、`TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1`，对接交接说明中的可信旧版权重。`refs/main` 必须等于配置中的 revision，避免静默加载其他版本。
-
-默认设备为 `cuda`，组合批量为 8；CUDA 不可用时报错，不会自动切到 CPU。组合前向显存不足会递减批量，单组合仍不足则保存错误并终止。单点扫描本身是整个 `[L,20]` 矩阵的一次前向，不受组合批量控制。运行日志记录峰值 GPU 显存。默认 float32、eval、no_grad，不启用混合精度或 compile，也不自行缓存模型内部表示。
-
-## 方法与明确约定
-
-| 项目 | 实际规则 |
+| 配置文件 | 结果目录 |
 |---|---|
-| 单点 | 所有可突变位置的 19 种非 WT 替换；保留 SPURS 分数严格 `< -0.5` 的全部突变，无 top-K 截断 |
-| 双点 | 为所有候选的无序对建图；不同位置用 SPURS **多点模型**预测，同位置直接标为严重不兼容 |
-| epistasis | `pair_score - single_i - single_j`；单点分数来自单点模型 |
-| 严重不兼容 | `pair_score > -0.5` 或 `epistasis > 1.0` 或同一位置，优先判定 |
-| 高可信边 | `pair_score < -1.2` 且 `epistasis < 0.5` |
-| 中间边 | 剩余双点；等于边界时按上述严格不等式分类 |
-| 组合高可信池 | 高可信边比例 `q >= 0.80`；分母是 `C(t,2)`，包括组合内全部边 |
-| 扩展 | 对当前层每个 beam 组合尝试添加每个候选突变，新突变与已有全部突变都不能严重不兼容 |
-| 边际 | `multi_score(child) - multi_score(parent) <= marginal[depth-1]`；等于阈值允许 |
-| 多路径 | 同一子组合可由多个父组合产生，只需有一个当前 beam 父组合满足边际；保留边际最优的父组合，子组合只评分一次 |
-| 排序 | 各池按多点总分升序，平分时按规范化突变字符串排序，最后输出也按总分升序 |
-| 配额 | 先选最多 `floor(0.8B)` 个高可信，再由中间池补至 B，包含补足高可信池的缺额 |
-| 距离 | 同层 `d(S1,S2)=t-|S1∩S2|`，按完整突变身份比较；与每个已选组合都必须达到阈值 |
-| 频率 | 每个单点突变最多出现 `floor(0.60B)` 次；**B 明确采用配置的 beam width（默认 100）** |
-| 候选不足 | 不放宽兼容性、边际、距离或频率；中间池不足时也不反向增加高可信配额，允许 beam 不满 |
+| `spurs_config.yaml` | `spurs_config/` |
+| `configs/run_a.yaml` | `configs/run_a/` |
+| `/data/experiments/depth10.yml` | `/data/experiments/depth10/` |
 
-配额与多样性共同通过“池内分数升序、逐个检查接纳”的确定性贪心选取实现。受约束后可以少于 B，不承诺全局最优的 beam 子集。
+只去掉最后一个 `.yaml` / `.yml` 扩展名，例如 `run.v2.yaml` 对应 `run.v2/`。没有 `output_dir` 配置或输出路径覆盖参数。新实验复制并重命名 YAML 即可；相同文件名再次运行会检查输入、配置、代码和环境身份，再续跑。
 
-按照用户确认，采用原方法文档**末尾数组**，数组索引对应 1–8 点，实际从双点开始：
-
-| 突变数 | 最小距离 | 加入新突变的边际上限 |
-|---|---:|---:|
-| 2 | 1 | 不使用，双点直接由兼容图初始化 |
-| 3 | 1 | -0.5 |
-| 4 | 1 | -0.5 |
-| 5 | 2 | -0.3 |
-| 6 | 2 | -0.3 |
-| 7 | 2 | -0.2 |
-| 8 | 3 | -0.2 |
-
-不使用正文中与数组冲突的 7 点距离 3、边际 -0.3。
-
-## 编号和阳性对照
-
-脚本独立读取 PDB 的残基身份和完整 N/CA/C/O 骨架，再与官方 `alt_parse_PDB` 的 `resn_list`、序列和实际 `batch['seq']` 逐项核对。`residue_mapping.csv` 同时记录链、PDB 编号、插入码、WT、模型 1-based 位置。
-
-本项目本地输入有 686 个 A 链残基、453 个可突变位点，单点候选空间为 8607 个替换。N188 和 K192 分别是 ASN、LYS。当前结构没有内部编号缺口、插入码或缺失骨架原子。脚本支持起始编号不为 1 的连续 PDB，并显式转换模型位置；对当前上游接口不能安全处理的内部缺号、插入码、非标准氨基酸、多模型和骨架 altloc 明确报错，不静默删除或重编号。
-
-`N188D/K192R` 单独评分并写入 `positive_controls.csv`。K192 不在提供的可突变列表内，作为对照仍可评分，但不会因此进入搜索候选。对照 WT 不匹配会终止，不修改 WT 或移动位置。
-
-## 分阶段与指定组合
+默认输入是**项目根目录**的 `1CXI.pdb`、`mutable_positions.txt` 和链 A，与当前工作目录或 YAML 所在位置无关。需要改变时使用命令行：
 
 ```bash
-bash run_spurs.sh --stage single
-bash run_spurs.sh --stage pairs
-bash run_spurs.sh --stage search
+python scripts/run_spurs.py --config configs/run_a.yaml \
+  --pdb /data/protein.pdb --chain A \
+  --mutable-positions /data/mutable_positions.txt
 ```
 
-后续阶段自动补齐必需的前序计算，已有单点矩阵和多点评分会复用；`search` 重建双点类别/候选池时复用 SQLite 评分，不重复已完成的模型推理。
+显式指定的相对输入路径相对于当前工作目录。Python 和 Bash 入口都可从其他工作目录运行，不启动服务、不构建项目、不重新安装 SPURS。
 
-对已知组合额外评分时，新建一个文本文件，每行用 `/` 分隔 PDB 编号突变，例如：
+## YAML 格式与 depth
 
-```text
-N188D/K192R
+`spurs_config.yaml` 只含方法文档中的四个部分：
+
+```yaml
+single:
+  cutoff: -0.5
+
+pair_graph:
+  severe:
+    pair_ddg_min: -0.5
+    epistasis_max: 1.0
+  high_confidence:
+    pair_ddg_max: -1.2
+    epistasis_max: 0.5
+
+beam:
+  depth: 8
+  width: 100
+  high_confidence_quota: 0.8
+  high_edge_ratio: 0.80
+  frequency_limit: 0.60
+
+gradient:
+  diversity: [0, 1, 1, 1, 2, 2, 2, 3]
+  marginal: [0, 0, -0.5, -0.5, -0.3, -0.3, -0.2, -0.2]
 ```
 
-```bash
-bash run_spurs.sh --stage score --mutations combinations.txt
-```
+没有 `source`、`positive_controls`、`runtime`、`output_dir`、`input` 或 `frequency_denominator` 配置项。额外键和重复 YAML 键会报错，避免拼写错误静默生效。
 
-每组允许 2–8 个突变；不同突变数分组调用多点模型。输出 `specified_combinations.csv`，不改变单点候选或搜索规则。该模式允许像对照一样评价非 mutable 位置。
+`beam.depth` 可以是任何 **≥ 2 的整数**，不再限制为 8。两个 gradient 数组按 `突变数 - 1` 索引，长度必须至少覆盖目标 depth；多余元素不参与搜索。depth=4 可使用原八项数组，也可只保留前四项。depth>8 时必须显式添加后续每层的距离和边际阈值；程序不会复制最后一项或猜测新阈值。数组不足会在加载模型前报错。
 
-## 结果和续跑
+默认数组仍沿用已确认的文档末尾版本：7 点最小距离 2、边际上限 -0.2。双点由兼容图初始化，不检查边际阈值。
 
-默认目录为 `results/spurs/`（已加入 Git 忽略）：
+## 筛选和搜索规则
 
-| 文件 | 内容 |
+| 步骤 | 规则 |
 |---|---|
-| `residue_mapping.csv` | 与 SPURS 解析输入核对后的编号表 |
-| `single_all.csv` / `single_matrix.json` | 全链所有 20 列原始预测，含 WT 零列与 mutable 标记 |
-| `single_candidates.csv` | 所有通过单点阈值的可变位置非 WT 替换，升序 |
-| `positive_controls.csv` | 阳性对照多点预测 |
-| `pair_graph.csv` | 全部无序双点的分数、epistasis 和三类边，包括同位点严重冲突 |
-| `beam_depth_2.csv` … `beam_depth_8.csv` | 各层已选组合、原始/模型编号、总分、q、父组合、边际 |
-| `beam_all_depths.csv` | 合并各层 beam；排名仍是层内排名 |
-| `final_candidates.csv` | 仅目标深度的最终组合；提前耗尽则为空，不将低阶结果伪装为 8 点结果 |
-| `search_summary.json` | 完成/耗尽状态、各层配额、频率、候选量及最后非空层 |
-| `predictions.sqlite3` | 已评分组合的缓存和当前搜索池；每个完成批次事务提交 |
-| `failed_predictions.csv` | 当前未成功的多点组合、错误状态及消息 |
-| `manifest.json` / `config.resolved.json` | 输入 SHA256、配置快照、Python/依赖版本、SPURS commit/源码哈希、模型身份 |
-| `run.log` / `run_status.json` | 日志、峰值显存、运行状态与失败原因 |
+| 单点 | 全链 `[L,20]` 矩阵；仅保留 mutable 位置、非 WT、分数严格 `< single.cutoff` 的全部突变，无 top-K 截断 |
+| 双点 | 所有候选的无序对；不同位置调用多点模型，同位置直接严重不兼容 |
+| epistasis | 多点模型双点分数减去两个单点模型分数 |
+| 严重边 | 双点分数 `>` severe 阈值，或 epistasis `>` severe 阈值，或同位置；优先判定 |
+| 高可信边 | 双点分数 `<` high_confidence 阈值，且 epistasis `<` 对应阈值 |
+| 中间边 | 剩余双点，遵守上述严格不等式 |
+| 扩展 | 新突变与已有全部突变都不严重不兼容；`child_score-parent_score <= marginal[t-1]` |
+| 多路径 | 子组合只需有一条来自当前 beam 的路径达到边际；保留边际最优的父组合，子组合只评分一次 |
+| 高可信池 | 组合全部边中高可信边占比 `q >= high_edge_ratio`，分母 `C(t,2)` |
+| 配额 | 各池按多点总分升序贪心选择，先最多 `floor(B × high_confidence_quota)` 个高可信，再由中间池补至 B |
+| 多样性 | 对每个已选组合同层距离 `t-共同突变数 >= diversity[t-1]` |
+| 频率 | 任一突变最多出现 `floor(B × frequency_limit)` 次，B 固定为配置的 width |
+| 候选不足 | 保持约束，允许 beam 不满；高可信不足由中间补齐，中间不足不反向增加高可信配额 |
 
-中断后运行**相同命令**即可恢复。成功批次不会重算；之前失败的批次会重试；双点图与层选择从缓存重新生成以保证完整性。进程锁会随进程退出自动释放，避免两个写入任务破坏同一输出目录。尚在写入的 CSV 使用临时文件，完成后原子替换。
+组合分数始终来自多点模型的完整前向，不用单点求和替代。默认 float32、eval、no_grad，每次深复制原始 batch 并重新设置突变张量。组合批量显存不足会递减批量，单组合仍失败则记录错误并停止。单点模型释放后才加载多点模型。
 
-配置、输入、代码、模型或依赖环境改变后，同一输出目录会拒绝混用旧结果。要改变阈值或路径开展新实验，请设置新的 `output_dir`。模型身份使用固定 revision、文件大小与纳秒 mtime，模型 YAML 额外计算 SHA256；几个 GB 的权重不做逐次全文哈希，这不是权重内容完整性验证。SQLite 与已写出的结果也不应手工修改。
+## 环境和依赖
 
-全双点预测数量随单点候选数 N 按 `N(N-1)/2` 增长，实际耗时依赖筛出的 N 和远程 GPU。程序不会为加速而截断候选。图类别使用三角形字节数组，搜索候选和分数存入 SQLite，避免将所有双点预测对象堆入内存。
+YAML 只描述方法参数，默认沿用交接环境。更换机器时可使用环境变量：
 
-## 验证边界
+| 环境变量 | 默认值 |
+|---|---|
+| `SPURS_REPO` | `/root/software/SPURS` |
+| `SPURS_OFFLINE_ROOT` | `/root/models/spurs-offline` |
+| `SPURS_MODEL_REVISION` | `0cc7a565af8f31eb122819f95a9d16e27b3d1596` |
+| `SPURS_DEVICE` | `cuda` |
+| `SPURS_BATCH_SIZE` | `8` |
+| `SPURS_SEED` | `42` |
 
-本地不需要 torch 的检查：
+离线缓存及可信旧版权重兼容变量会在导入 SPURS/Hugging Face 前设置，不依赖 `.bashrc`。实际输入、运行环境、版本与模型身份仍记录在 `manifest.json`，可复用的方法快照为 `config.resolved.yaml`。
+
+YAML 使用 PyYAML（通常已随 SPURS 的 OmegaConf 安装）。绘图仅需 numpy 和 matplotlib，可在没有 GPU / SPURS 的电脑运行。按需安装：
 
 ```bash
-python scripts/run_spurs.py --validate-inputs
+python -m pip install -r requirements-tools.txt
+```
+
+若服务器使用交接文档的版本约束，可追加 `-c /root/software/SPURS/constraints-server.txt`。该清单不包含 torch 或旧 SPURS 训练依赖。
+
+## 单独绘图
+
+指定**结果文件夹**即可，无需再传配置；脚本读取该目录保存的方法快照，自动识别可用中间结果：
+
+```bash
+# 所有已完成阶段
+python scripts/plot_spurs.py spurs_config
+
+# 分别运行
+python scripts/plot_spurs_single.py spurs_config
+python scripts/plot_spurs_pairs.py spurs_config
+python scripts/plot_spurs_beam.py spurs_config
+
+# 选择类型与导出格式
+python scripts/plot_spurs.py configs/run_a --plots pairs beam \
+  --formats png pdf --sample-size 20000 --matrix-size 40 --top-mutations 30
+```
+
+输出在结果目录下的 `plots/`，默认同时生成 PNG 和 PDF，另支持 SVG。使用无窗口后端，适合远程服务器。旧版 JSON 配置生成的结果目录也能直接绘制。
+
+| 图文件名 | 内容 |
+|---|---|
+| `single_scores` | 可变位置非 WT 单点评分分布、已选分布、真实 cutoff；各位置最优分数 |
+| `single_substitution_heatmap` | 替换氨基酸 × PDB 位置热图；灰色表示保护位点、WT 或缺失 |
+| `pair_scores_and_classes` | 全部有效双点的三类数量；双点总分与 epistasis 散点及保存的阈值线 |
+| `pair_compatibility_matrix` | 默认单点分数最好的前 40 个突变之间的三类兼容矩阵，明确标注是子集 |
+| `beam_progress` | 自动识别所有深度：每层总分分布、最优分数、beam 占用、高可信边比例、边际分布 |
+| `beam_mutation_frequency` | 常见突变占实际已选组合的比例；每层最大出现次数与固定 B 的频率上限 |
+
+大双点表逐行读取。类别计数使用全部有效边；散点最多均匀抽样 `sample-size` 条（固定种子 42），图题和报告注明抽样量，同位点未评分冲突不会变成零分散点。兼容矩阵只展示限定数量节点，不截断预测数据。无保存配置时仍可绘制数据，但不猜测阈值线。
+
+单点完成即可绘制单点图；其他阶段尚无输出时自动跳过。beam 按当前已有层文件绘制，允许空层、提前耗尽或 depth>8。只读取已完成的 CSV，不读 `.tmp`。`plot_report.json` 和每类 `*_plot_report.json` 记录生成文件、数据量、抽样量、跳过/失败状态和无效行数。重复绘图不运行模型，也不修改 CSV。
+
+## 分阶段、结果与恢复
+
+```bash
+bash run_spurs.sh --config spurs_config.yaml --stage single
+bash run_spurs.sh --config spurs_config.yaml --stage pairs
+bash run_spurs.sh --config spurs_config.yaml --stage search
+```
+
+后续阶段自动补齐前序计算，成功预测会复用。也可用 `--stage score --mutations combinations.txt` 评价显式组合：每行用 `/` 分隔 PDB 编号突变，至少两处、最多不超过结构残基数；不同突变数分组调用，写入 `specified_combinations.csv`，不注入搜索。
+
+主要输出：`residue_mapping.csv`、`single_all.csv`、`single_candidates.csv`、`pair_graph.csv`、`beam_depth_<n>.csv`、`beam_all_depths.csv`、`final_candidates.csv`、`search_summary.json`、`predictions.sqlite3`、`failed_predictions.csv`、`manifest.json`、`config.resolved.yaml`、`run.log`、`run_status.json`。
+
+`final_candidates.csv` 只放目标深度结果，提前耗尽则为空，较低层仍在各层 CSV 和汇总中。所有双点都构图，计算量随单点候选数量平方增长。
+
+中断后重跑相同命令，SQLite 已提交的批次不会重算，失败批次重试。CSV 完成后原子替换，进程锁退出时自动释放。配置、输入、代码或环境变化会拒绝复用旧缓存；新实验改用新的 YAML 文件名。大权重以固定 revision、大小和 mtime 识别，模型 YAML 额外 SHA256，不等于大权重全文完整性校验。
+
+## 验证
+
+```bash
+python scripts/run_spurs.py --config spurs_config.yaml --validate-inputs
 python -m unittest discover -s tests -v
 ```
 
-`--validate-inputs` 只核对配置、PDB、mutable 和对照，输出名称明确为 `input_mapping_unverified.csv`，不会声称模型映射或 GPU 推理已验收。测试使用明确标记的合成预测，覆盖完整候选图、三类边阈值、非加和评分、7 点数组、边际、多路径去重、配额、多样性、频率限制、8 点搜索、失败重试和断点续跑。生产 CLI 没有假模型/模拟分数开关。
+输入检查需要 PyYAML，不需要 torch。真实模型映射和 GPU 推理由服务器上的 `--check` / `--smoke-test` 验收。测试中的合成分数仅用于验证算法和图表，不是实际预测。
 
-当前开发环境未连接到目标服务器执行真实推理，因此远程验收以服务器上 `--check`、`--smoke-test` 的成功日志为准。缺包时沿用交接说明补齐现有环境，不重新安装旧训练版依赖。
-
-## 上游依据
-
-- 评分使用上游接口的原始输出，不翻转符号；论文以负值作为稳定化方向，结果字段保持 `spurs_score`，不混同实验测量值。[SPURS 论文](https://www.nature.com/articles/s41467-025-67609-4)
-- 单点、多点加载及突变位置减一等接口依据：[兼容分支 inference.py](https://github.com/luo-group/SPURS/blob/fix/py311-inference-beta/spurs/inference.py)。
-- 多点使用独立模型的完整前向；每次深复制原始 batch 并重新设置 mutation tensors，以应对上游输入修改。[SPURSMulti](https://github.com/luo-group/SPURS/blob/fix/py311-inference-beta/spurs/models/stability/spurs_multi.py)
-
-上述兼容边、跨两个模型计算的 epistasis 指标和 beam 阈值属于本项目的方法约定，不是实测物理相互作用能，也不保证实验热稳定性结果。
+SPURS 原始输出不翻转符号，阈值和跨两个模型计算的 epistasis 属于本项目约定。[论文](https://www.nature.com/articles/s41467-025-67609-4)、[推理接口](https://github.com/luo-group/SPURS/blob/fix/py311-inference-beta/spurs/inference.py)、[多点前向](https://github.com/luo-group/SPURS/blob/fix/py311-inference-beta/spurs/models/stability/spurs_multi.py)。

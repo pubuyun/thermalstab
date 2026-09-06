@@ -1,3 +1,5 @@
 __pycache__/
 *.py[cod]
-results/spurs*/
+results/
+/spurs_config/
+/.venv-tools/

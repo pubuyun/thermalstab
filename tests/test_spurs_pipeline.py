@@ -16,7 +16,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from thermal.common import AA, load_config
+from thermal.common import AA, load_config, method_config, resolve_run_config, write_yaml
 from thermal.backend import SpursBackend
 from thermal.pipeline import bind_run, run, single_stage
 from thermal.search import (
@@ -28,7 +28,7 @@ from thermal.structure import Mutation, Residue, parse_original_group, read_muta
 
 
 def default_config():
-    return load_config(ROOT / "spurs_config.json")
+    return resolve_run_config(ROOT / "spurs_config.yaml", pdb=ROOT / "1CXI.pdb", mutable_positions=ROOT / "mutable_positions.txt")
 
 
 def mutations(count):
@@ -46,17 +46,17 @@ class SyntheticBackend:
 
 
 class StructureTests(unittest.TestCase):
-    def test_real_inputs_and_control(self):
+    def test_real_inputs_and_mutation_validation(self):
         residues = read_structure(ROOT / "1CXI.pdb", "A")
         mutable = read_mutable(ROOT / "mutable_positions.txt", residues)
         self.assertEqual((len(residues), len(mutable)), (686, 453))
-        group = parse_original_group(["N188D", "K192R"], residues)
-        self.assertEqual([m.model for m in group], ["N188D", "K192R"])
-        self.assertNotIn(residues[191], mutable)  # Control bypasses mutable filtering only for evaluation.
+        originals = [Mutation(r, next(aa for aa in AA if aa != r.wt_aa)).original for r in residues[:2]]
+        group = parse_original_group(originals, residues)
+        self.assertEqual([m.model for m in group], originals)
         with self.assertRaises(ValueError):
-            parse_original_group(["A188D", "K192R"], residues)
+            parse_original_group([group[0].mt_aa + originals[0][1:]], residues)
         with self.assertRaises(ValueError):
-            parse_original_group(["N188D", "N188A"], residues)
+            parse_original_group([originals[0], originals[0]], residues)
 
     def test_parser_mapping_must_match_sequence_and_numbering(self):
         residues = [Residue("A", 21, "", "A", 1), Residue("A", 22, "", "C", 2)]
@@ -83,6 +83,48 @@ class StructureTests(unittest.TestCase):
 
 
 class RuleTests(unittest.TestCase):
+    def test_yaml_only_method_fields_and_variable_depth(self):
+        cfg = load_config(ROOT / "spurs_config.yaml")
+        self.assertEqual(set(cfg), {"single", "pair_graph", "beam", "gradient"})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "experiment.yml"
+            for depth in (2, 4, 8, 10):
+                cfg["beam"]["depth"] = depth
+                cfg["gradient"] = {"diversity": [0] + [1] * (depth - 1), "marginal": [0, 0] + [-.2] * (depth - 2)}
+                write_yaml(path, cfg)
+                self.assertEqual(load_config(path)["beam"]["depth"], depth)
+            cfg["gradient"]["marginal"].pop()
+            write_yaml(path, cfg)
+            with self.assertRaisesRegex(ValueError, "must cover beam.depth=10"):
+                load_config(path)
+
+    def test_smaller_depth_allows_longer_arrays_and_duplicate_yaml_is_rejected(self):
+        cfg = load_config(ROOT / "spurs_config.yaml")
+        cfg["beam"]["depth"] = 3
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run.yaml"
+            write_yaml(path, cfg)
+            self.assertEqual(len(load_config(path)["gradient"]["marginal"]), 8)
+            with path.open("a") as handle:
+                handle.write("single:\n  cutoff: -1\n")
+            with self.assertRaisesRegex(ValueError, "Duplicate YAML key"):
+                load_config(path)
+
+    def test_removed_configuration_fields_are_rejected(self):
+        cfg = load_config(ROOT / "spurs_config.yaml")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run.yaml"
+            cfg["runtime"] = {}
+            write_yaml(path, cfg)
+            with self.assertRaises(ValueError):
+                load_config(path)
+
+    def test_output_folder_uses_yaml_parent_and_stem(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "experiment.v2.yaml"
+            write_yaml(path, load_config(ROOT / "spurs_config.yaml"))
+            cfg = resolve_run_config(path, pdb=ROOT / "1CXI.pdb", mutable_positions=ROOT / "mutable_positions.txt")
+            self.assertEqual(Path(cfg["output_dir"]), path.with_suffix(""))
     def test_document_arrays(self):
         cfg = default_config()
         self.assertEqual(cfg["gradient"]["diversity"], [0, 1, 1, 1, 2, 2, 2, 3])
@@ -216,6 +258,18 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(len(backend.calls), old_calls)
         self.assertEqual((self.output / "final_candidates.csv").read_bytes(), old_final)
 
+    def test_search_beyond_eight(self):
+        self.cfg["beam"].update(depth=10, width=10, high_confidence_quota=1, frequency_limit=1)
+        self.cfg["gradient"] = {"diversity": [0] + [1] * 9, "marginal": [0, 0] + [-.25] * 8}
+        nodes = mutations(12)
+        scorer = CachedScorer(self.store, SyntheticBackend(), 8)
+        graph = build_pair_graph(nodes, [-.75] * 12, self.cfg, self.store, scorer, self.output)
+        layers = beam_search(graph, self.cfg, self.store, scorer, self.output)
+        self.assertEqual(layers[-1]["depth"], 10)
+        self.assertGreater(layers[-1]["selected"], 0)
+        with (self.output / "final_candidates.csv").open() as handle:
+            self.assertTrue(all(row["mutation_count"] == "10" for row in csv.DictReader(handle)))
+
 
 class PipelineTests(unittest.TestCase):
     def test_all_stage_orchestration_with_synthetic_backend(self):
@@ -240,14 +294,12 @@ class PipelineTests(unittest.TestCase):
             run(args, cfg, residues, mutable, output)
             self.assertEqual([kind for kind, _ in backends], ["single", "multi"])
             self.assertEqual(json.loads((output / "search_summary.json").read_text())["status"], "completed")
-            with (output / "positive_controls.csv").open() as handle:
-                controls = list(csv.DictReader(handle))
-            self.assertEqual(controls[0]["mutation_original"], "N188D/K192R")
-            self.assertEqual(controls[0]["spurs_score"], "-2.0")
+            self.assertFalse((output / "positive_controls.csv").exists())
+            self.assertEqual(set(load_config(output / "config.resolved.yaml")), set(method_config(cfg)))
             with (output / "single_candidates.csv").open() as handle:
                 self.assertEqual(len(list(csv.DictReader(handle))), 16)
 
-    def test_single_cutoff_full_scan_and_control_not_injected(self):
+    def test_single_cutoff_full_scan_and_protected_positions(self):
         residues = [Residue("A", i, "", "A", i) for i in range(1, 4)]
         matrix = [[0] * 20 for _ in residues]
         matrix[0][AA.index("C")] = -.5

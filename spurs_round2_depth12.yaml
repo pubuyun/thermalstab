@@ -1,0 +1,27 @@
+# Round 2: exploratory depth ceiling, not a validated optimal mutation count.
+# Rationale: results/round2_configuration_rationale.md
+# Output directory: spurs_round2_depth12/
+single:
+  cutoff: -0.5
+
+pair_graph:
+  severe:
+    pair_ddg_min: -0.5
+    epistasis_max: 1.0
+  high_confidence:
+    pair_ddg_max: -1.2
+    epistasis_max: 0.5
+
+beam:
+  depth: 12
+  width: 100
+  high_confidence_quota: 0.50
+  high_edge_ratio: 0.80
+  # Current implementation caps counts at 60, not 60% of an underfilled beam.
+  frequency_limit: 0.60
+
+# Entries correspond to mutation counts 1 through 12.
+# Keep nearby search branches; apply stricter diversity to the final shortlist.
+gradient:
+  diversity: [0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2]
+  marginal: [0, 0, -0.5, -0.5, -0.3, -0.3, -0.3, -0.3, -0.3, -0.3, -0.3, -0.3]

@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 
 from .backend import SpursBackend, preflight
-from .common import AA, digest_file, digest_object, finite, load_config, write_csv, write_json
+from .common import AA, digest_file, digest_object, finite, method_config, resolve_run_config, write_csv, write_json, write_yaml
 from .search import beam_search, build_pair_graph
 from .storage import CachedScorer, Store, output_lock
 from .structure import Mutation, parse_original_group, read_mutable, read_structure, write_mapping
@@ -41,12 +41,12 @@ def bind_run(cfg, environment, output):
     if manifest_path.exists():
         previous = json.loads(manifest_path.read_text(encoding="utf-8"))
         if previous["fingerprint"] != fingerprint:
-            raise ValueError("Run identity changed (config/input/code/model/environment). Use a new output_dir; old predictions are not reusable under this identity")
+            raise ValueError("Run identity changed (config/input/code/model/environment). Copy the YAML to a new name to start a separate run")
     else:
         if (output / "predictions.sqlite3").exists() or (output / "single_matrix.json").exists():
-            raise ValueError("Unbound prediction files exist without manifest.json; use a new output_dir")
+            raise ValueError("Unbound prediction files exist without manifest.json; use a differently named YAML")
         write_json(manifest_path, {"created_at": utc_now(), "fingerprint": fingerprint, "identity": identity, "environment": environment})
-    write_json(output / "config.resolved.json", cfg)
+    write_yaml(output / "config.resolved.yaml", method_config(cfg))
 
 
 def single_stage(cfg, residues, mutable, output):
@@ -96,8 +96,7 @@ def single_stage(cfg, residues, mutable, output):
 
 
 def score_groups(groups, residues, scorer, output_path):
-    # PDB WT validation is deliberately independent of the mutable list: controls
-    # may include a protected position, but are never injected into the search.
+    # Explicitly requested groups are evaluated independently of search eligibility.
     parsed = [parse_original_group(group, residues) for group in groups]
     scores = {}
     for count in sorted({len(group) for group in parsed}):
@@ -113,7 +112,7 @@ def score_groups(groups, residues, scorer, output_path):
     return rows
 
 
-def smoke_test(cfg, residues, controls, output):
+def smoke_test(cfg, residues, output):
     single = SpursBackend(cfg, residues, "single")
     try:
         single.single_matrix()
@@ -122,12 +121,13 @@ def smoke_test(cfg, residues, controls, output):
     LOG.info("Single prediction: PASS")
     multi = SpursBackend(cfg, residues, "multi")
     try:
-        control = parse_original_group(controls[0], residues) if controls else tuple(
+        # Arbitrary API probes, with no assumed stability effect and no search output.
+        probe = tuple(
             Mutation(r, "A" if r.wt_aa != "A" else "C") for r in residues[:2]
         )
-        group = [m.model for m in control]
-        alternate = [m.model for m in control[:-1]] + [Mutation(control[-1].residue, next(
-            aa for aa in AA if aa not in {control[-1].residue.wt_aa, control[-1].mt_aa}
+        group = [m.model for m in probe]
+        alternate = [m.model for m in probe[:-1]] + [Mutation(probe[-1].residue, next(
+            aa for aa in AA if aa not in {probe[-1].residue.wt_aa, probe[-1].mt_aa}
         )).model]
         first = multi.score([group])[0]
         batch = multi.score([group, alternate])
@@ -137,19 +137,16 @@ def smoke_test(cfg, residues, controls, output):
     finally:
         multi.close()
     LOG.info("Multi prediction: PASS")
-    write_json(output / "smoke_test.json", {"status": "passed", "time": utc_now(), "first": first, "batch": batch, "again": again})
+    write_json(output / "smoke_test.json", {"status": "passed", "time": utc_now(), "probe_groups_model": [group, alternate], "first": first, "batch": batch, "again": again})
     LOG.info("SPURS installation and target-PDB inference verified.")
 
 
 def run(args, cfg, residues, mutable, output):
-    for group in cfg["positive_controls"]:
-        parse_original_group(group, residues)
     if args.validate_inputs:
         write_mapping(output / "input_mapping_unverified.csv", residues)
         write_json(output / "input_validation.json", {
             "status": "input_only_passed", "model_mapping_verified": False,
             "residues": len(residues), "mutable_positions": len(mutable),
-            "positive_controls": cfg["positive_controls"],
         })
         LOG.info("Input-only validation: PASS (%d residues, %d mutable); SPURS model mapping not yet checked", len(residues), len(mutable))
         return
@@ -162,7 +159,7 @@ def run(args, cfg, residues, mutable, output):
     bind_run(cfg, environment, output)
     write_mapping(output / "residue_mapping.csv", residues)
     if args.smoke_test:
-        smoke_test(cfg, residues, cfg["positive_controls"], output)
+        smoke_test(cfg, residues, output)
         return
     store = Store(output / "predictions.sqlite3")
     try:
@@ -174,12 +171,11 @@ def run(args, cfg, residues, mutable, output):
         backend = SpursBackend(cfg, residues, "multi")
         try:
             scorer = CachedScorer(store, backend, cfg["runtime"]["batch_size"])
-            score_groups(cfg["positive_controls"], residues, scorer, output / "positive_controls.csv")
             if args.stage == "score":
                 lines = Path(args.mutations).read_text(encoding="utf-8-sig").splitlines()
                 groups = [line.split("#", 1)[0].strip().split("/") for line in lines if line.split("#", 1)[0].strip()]
-                if not groups or any(len(group) < 2 or len(group) > 8 for group in groups):
-                    raise ValueError("Mutation file must contain groups of 2–8 mutations, separated by '/', one group per line")
+                if not groups or any(len(group) < 2 or len(group) > len(residues) for group in groups):
+                    raise ValueError("Each line must contain 2 or more mutations (at most the sequence length), separated by '/'")
                 score_groups(groups, residues, scorer, output / "specified_combinations.csv")
                 return
             graph = build_pair_graph(mutations, singles, cfg, store, scorer, output)
@@ -196,10 +192,13 @@ def run(args, cfg, residues, mutable, output):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="SPURS single scan, full pair graph and diverse beam search; no other evaluation methods.")
-    parser.add_argument("--config", type=Path, default=ROOT / "spurs_config.json")
+    parser.add_argument("--config", type=Path, required=True, help="Method YAML; results go into its sibling directory with the same stem")
+    parser.add_argument("--pdb", type=Path, default=ROOT / "1CXI.pdb")
+    parser.add_argument("--mutable-positions", type=Path, default=ROOT / "mutable_positions.txt")
+    parser.add_argument("--chain", default="A")
     parser.add_argument("--stage", choices=("all", "single", "pairs", "search", "score"), default="all")
     checks = parser.add_mutually_exclusive_group()
-    checks.add_argument("--validate-inputs", action="store_true", help="Only standard-library PDB/config/WT checks; no model or CUDA needed")
+    checks.add_argument("--validate-inputs", action="store_true", help="YAML/PDB/mutable checks; no model or CUDA needed")
     checks.add_argument("--check", action="store_true", help="Offline cache, imports, GPU and real SPURS parser checks")
     checks.add_argument("--smoke-test", action="store_true", help="Real single and multi GPU inference, repeated-forward and batching checks")
     parser.add_argument("--mutations", type=Path, help="PDB-numbered combinations for --stage score")
@@ -210,15 +209,17 @@ def main(argv=None):
         parser.error("--mutations is only used with --stage score")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
     try:
-        cfg = load_config(args.config)
+        cfg = resolve_run_config(args.config, pdb=args.pdb, mutable_positions=args.mutable_positions, chain=args.chain)
         output = Path(cfg["output_dir"])
         output.mkdir(parents=True, exist_ok=True)
         with output_lock(output):
+            if not (output / ".gitignore").exists():
+                (output / ".gitignore").write_text("*\n", encoding="utf-8")
             handler = logging.FileHandler(output / "run.log", encoding="utf-8")
             handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
             logging.getLogger().addHandler(handler)
             try:
-                write_json(output / "run_status.json", {"status": "running", "started_at": utc_now(), "arguments": vars(args) | {"config": str(args.config), "mutations": str(args.mutations) if args.mutations else None}})
+                write_json(output / "run_status.json", {"status": "running", "started_at": utc_now(), "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}})
                 residues = read_structure(cfg["input"]["pdb"], cfg["input"]["chain"])
                 mutable = read_mutable(cfg["input"]["mutable_positions"], residues)
                 run(args, cfg, residues, mutable, output)
