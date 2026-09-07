@@ -51,13 +51,13 @@ class StructureTests(unittest.TestCase):
         numpy = SimpleNamespace(zeros=lambda *args, **kwargs: array, float32="float32",
                                 __version__="1.26.4", __file__="/env/numpy/__init__.py")
         good = SimpleNamespace(from_numpy=lambda value: value, __version__="2.8.0")
-        verify_numpy_bridge(good, numpy)
+        verify_numpy_bridge(good, numpy, "before importing SPURS")
 
         def reject(_):
             raise TypeError("expected np.ndarray (got numpy.ndarray)")
         bad = SimpleNamespace(from_numpy=reject, __version__="2.8.0")
-        with self.assertRaisesRegex(RuntimeError, "PyTorch/NumPy bridge failed.*numpy=1.26.4"):
-            verify_numpy_bridge(bad, numpy)
+        with self.assertRaisesRegex(RuntimeError, "PyTorch/NumPy bridge failed.*numpy import=1.26.4"):
+            verify_numpy_bridge(bad, numpy, "before importing SPURS")
 
     def test_real_inputs_and_mutation_validation(self):
         residues = read_structure(ROOT / "1CXI.pdb", "A")
