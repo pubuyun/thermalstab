@@ -1,0 +1,24 @@
+# Round 3: stop at the confidence-ratio breakpoint observed in round 2.
+# Output directory: spurs_round3_depth10/
+single:
+  cutoff: -0.5
+
+pair_graph:
+  severe:
+    pair_ddg_min: -0.5
+    epistasis_max: 1.0
+  high_confidence:
+    pair_ddg_max: -1.2
+    epistasis_max: 0.5
+
+beam:
+  depth: 10
+  width: 100
+  high_confidence_quota: 0.50
+  high_edge_ratio: 0.70
+  frequency_limit: 0.60
+
+# Entries correspond to mutation counts 1 through 10.
+gradient:
+  diversity: [0, 1, 1, 1, 1, 1, 2, 2, 2, 2]
+  marginal: [0, 0, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5]

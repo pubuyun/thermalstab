@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from thermal.common import AA, load_config, method_config, resolve_run_config, write_yaml
-from thermal.backend import SpursBackend
+from thermal.backend import SpursBackend, verify_numpy_bridge
 from thermal.pipeline import bind_run, run, single_stage
 from thermal.search import (
     HIGH, INTERMEDIATE, SEVERE, BeamItem, PairGraph, beam_search,
@@ -46,6 +46,19 @@ class SyntheticBackend:
 
 
 class StructureTests(unittest.TestCase):
+    def test_numpy_bridge_reports_environment_before_spurs_parse(self):
+        array = SimpleNamespace(shape=(1,))
+        numpy = SimpleNamespace(zeros=lambda *args, **kwargs: array, float32="float32",
+                                __version__="1.26.4", __file__="/env/numpy/__init__.py")
+        good = SimpleNamespace(from_numpy=lambda value: value, __version__="2.8.0")
+        verify_numpy_bridge(good, numpy)
+
+        def reject(_):
+            raise TypeError("expected np.ndarray (got numpy.ndarray)")
+        bad = SimpleNamespace(from_numpy=reject, __version__="2.8.0")
+        with self.assertRaisesRegex(RuntimeError, "PyTorch/NumPy bridge failed.*numpy=1.26.4"):
+            verify_numpy_bridge(bad, numpy)
+
     def test_real_inputs_and_mutation_validation(self):
         residues = read_structure(ROOT / "1CXI.pdb", "A")
         mutable = read_mutable(ROOT / "mutable_positions.txt", residues)

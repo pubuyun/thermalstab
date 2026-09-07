@@ -17,6 +17,25 @@ from .structure import verify_model_mapping
 LOG = logging.getLogger(__name__)
 
 
+def verify_numpy_bridge(torch, numpy):
+    """Fail before SPURS parsing when torch and the loaded NumPy cannot interoperate."""
+    try:
+        probe = numpy.zeros(1, dtype=numpy.float32)
+        tensor = torch.from_numpy(probe)
+        if tuple(tensor.shape) != (1,):
+            raise RuntimeError(f"unexpected probe shape: {tuple(tensor.shape)}")
+    except (TypeError, RuntimeError) as exc:
+        raise RuntimeError(
+            "PyTorch/NumPy bridge failed before SPURS inference: "
+            f"torch={getattr(torch, '__version__', 'unknown')}, "
+            f"numpy={getattr(numpy, '__version__', 'unknown')} from "
+            f"{getattr(numpy, '__file__', 'unknown')}, python={sys.executable}. "
+            "Use the same Python environment as the successful SPURS run, restore "
+            "NumPy 1.26.4 with /root/software/SPURS/constraints-server.txt, then "
+            "start a new Python process. Do not reinstall torch."
+        ) from exc
+
+
 def configure_environment(cfg):
     runtime = cfg["runtime"]
     root, repo = Path(runtime["offline_root"]), Path(runtime["spurs_repo"])
@@ -65,6 +84,7 @@ def preflight(cfg, residues):
     actual = Path(inference.__file__).resolve()
     if actual != (repo / "spurs/inference.py").resolve():
         raise RuntimeError(f"Unexpected installed SPURS source: {actual}")
+    verify_numpy_bridge(torch, numpy)
     device = torch.device(runtime["device"])
     if device.type == "cuda":
         if not torch.cuda.is_available():

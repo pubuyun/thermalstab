@@ -109,7 +109,31 @@ YAML 使用 PyYAML（通常已随 SPURS 的 OmegaConf 安装）。绘图仅需 n
 python -m pip install -r requirements-tools.txt
 ```
 
-若服务器使用交接文档的版本约束，可追加 `-c /root/software/SPURS/constraints-server.txt`。该清单不包含 torch 或旧 SPURS 训练依赖。
+服务器的SPURS环境必须追加已有约束，避免工具依赖升级NumPy：
+
+```bash
+python -m pip install -r requirements-tools.txt \
+  -c /root/software/SPURS/constraints-server.txt
+```
+
+该约束记录已成功运行的`numpy==1.26.4`及当前torch版本；不要执行SPURS旧训练依赖，也不要重装torch。
+
+如果预检报`expected np.ndarray (got numpy.ndarray)`，先在同一Python中运行：
+
+```bash
+python - <<'PY'
+import sys, numpy, torch
+print(sys.executable, numpy.__version__, numpy.__file__, torch.__version__)
+print(torch.from_numpy(numpy.zeros(1, dtype=numpy.float32)))
+PY
+```
+
+若最小探针也失败，恢复已验证版本后启动新进程：
+
+```bash
+python -m pip install --force-reinstall --no-cache-dir numpy==1.26.4 \
+  -c /root/software/SPURS/constraints-server.txt
+```
 
 ## 单独绘图
 
