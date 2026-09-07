@@ -109,54 +109,7 @@ YAML 使用 PyYAML（通常已随 SPURS 的 OmegaConf 安装）。绘图仅需 n
 python -m pip install -r requirements-tools.txt
 ```
 
-服务器的SPURS环境必须追加已有约束，避免工具依赖升级NumPy：
-
-```bash
-python -m pip install -r requirements-tools.txt \
-  -c /root/software/SPURS/constraints-server.txt
-```
-
-该约束记录已成功运行的`numpy==1.26.4`及当前torch版本；不要执行SPURS旧训练依赖，也不要重装torch。
-
-如果预检报`expected np.ndarray (got numpy.ndarray)`，先在同一Python中运行：
-
-```bash
-python - <<'PY'
-import sys, numpy, torch
-print(sys.executable, numpy.__version__, numpy.__file__, torch.__version__)
-print(torch.from_numpy(numpy.zeros(1, dtype=numpy.float32)))
-PY
-```
-
-若最小探针也失败，先检查是否混用了pip与conda的NumPy：
-
-```bash
-python -m pip show numpy
-/root/miniconda3/bin/conda list | grep -E '^numpy([[:space:]]|-)'
-```
-
-当前验证环境是`/root/miniconda3/bin/python`。如果输出同时含pip安装的NumPy与conda的`numpy-base`，仅用pip覆盖可能留下混合文件。先移除pip记录，再让conda统一恢复两个包：
-
-```bash
-/root/miniconda3/bin/python -m pip uninstall -y numpy
-/root/miniconda3/bin/conda install -y --freeze-installed --force-reinstall \
-  'numpy=1.26.4' 'numpy-base=1.26.4'
-```
-
-关闭当前shell中可能驻留的Python/Jupyter进程，启动新进程后再次执行转换探针。确认探针成功后再运行SPURS。不要同时执行pip和conda的NumPy安装，也不要重装torch。
-
-如果`conda list`本来就只有一致的1.26.4包，先保存以下输出再处理；它用于区分Torch安装损坏与SPURS导入污染：
-
-```bash
-/root/miniconda3/bin/python - <<'PY'
-import numpy, torch
-print('before SPURS:', torch.from_numpy(numpy.zeros(1, dtype=numpy.float32)))
-import sys
-sys.path.insert(0, '/root/software/SPURS')
-import spurs.inference
-print('after SPURS:', torch.from_numpy(numpy.zeros(1, dtype=numpy.float32)))
-PY
-```
+若服务器使用交接文档的版本约束，可追加 `-c /root/software/SPURS/constraints-server.txt`。该清单不包含 torch 或旧 SPURS 训练依赖。
 
 ## 单独绘图
 
