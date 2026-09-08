@@ -1,0 +1,32 @@
+# Round 4: diversity-focused depth10 search
+#
+# Keep the effective Round 3 settings unchanged except frequency_limit.
+# The current implementation derives the absolute mutation-frequency cap
+# from beam.width (100), even when a layer is underfilled. Setting 0.35
+# therefore limits a mutation to 35 selected candidates and is a practical
+# workaround for the 55/62 concentration observed at Round 3 depth10.
+
+single:
+  cutoff: -0.5
+
+pair_graph:
+  severe:
+    pair_ddg_min: -0.5
+    epistasis_max: 1.0
+  high_confidence:
+    pair_ddg_max: -1.2
+    epistasis_max: 0.5
+
+beam:
+  depth: 10
+  width: 100
+  high_confidence_quota: 0.50
+  high_edge_ratio: 0.70
+  frequency_limit: 0.35
+
+# Entries correspond to mutation counts 1 through 10.
+# Keep the strict marginal threshold used in the effective Round 3 run;
+# change only mutation-frequency pressure in this comparison.
+gradient:
+  diversity: [0, 1, 1, 1, 1, 1, 2, 2, 2, 2]
+  marginal: [0, 0, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5]
